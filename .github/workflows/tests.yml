@@ -77,6 +77,12 @@ jobs:
           [ ! -s "$RUNNER_TEMP/missing" ] \
             || { echo "::error::signed tarballs with no formula stanza:"; cat "$RUNNER_TEMP/missing"; exit 1; }
 
+      # The ubuntu-24.04 image installs Homebrew but leaves it off PATH
+      # (actions/runner-images, Ubuntu2404-Readme.md, "Homebrew note").
+      - name: Put the runner's Homebrew on PATH
+        if: runner.os == 'Linux'
+        run: echo "/home/linuxbrew/.linuxbrew/bin" >> "$GITHUB_PATH"
+
       # Step 3. post_install_steps needs a current Homebrew, and a tapped,
       # trusted formula (Homebrew refuses a bare file path).
       - name: Tap, lint, install and test
