@@ -62,7 +62,9 @@ class Quantumssh < Formula
   end
 
   # The configuration is written once: an upgrade keeps the operator's
-  # edits (overwrite: false).
+  # edits (overwrite: false). write_file creates it under the umask, and a
+  # umask of 002 leaves it group-writable, which the server refuses
+  # (ADR-0029): hence its mode.
   post_install_steps do
     mkdir_p "quantumssh", base: :etc
     set_permissions "quantumssh", "0700", base: :etc, recursive: false
@@ -78,6 +80,7 @@ class Quantumssh < Formula
       [auth]
       authorized_keys = "{{etc}}/quantumssh/authorized_keys"
     TOML
+    set_permissions "quantumssh/config.toml", "0600", base: :etc, recursive: false
   end
 
   service do
@@ -99,7 +102,7 @@ class Quantumssh < Formula
       Before the first start:
         chmod g-w "$(brew --prefix)/etc"
         quantumssh keygen "$(brew --prefix)/etc/quantumssh/ssh_host_mldsa44_ed25519_key"
-        cp ~/.ssh/id_ed25519.pub "$(brew --prefix)/etc/quantumssh/authorized_keys"
+        install -m 0644 ~/.ssh/id_ed25519.pub "$(brew --prefix)/etc/quantumssh/authorized_keys"
         brew services start quantumssh
 
       The server refuses its configuration and keys under a group-writable
