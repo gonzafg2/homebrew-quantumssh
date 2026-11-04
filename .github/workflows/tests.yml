@@ -121,6 +121,7 @@ jobs:
           "$openssh/ssh-keygen" -q -t mldsa44-ed25519 -N '' -f "$etc/quantumssh/ssh_host_mldsa44_ed25519_key"
           "$openssh/ssh-keygen" -q -t ed25519 -N '' -f "$RUNNER_TEMP/client"
           install -m 0644 "$RUNNER_TEMP/client.pub" "$etc/quantumssh/authorized_keys"
+          echo "umask $(umask)"; ls -la "$etc/quantumssh"
           brew services start quantumssh
           for _ in $(seq 1 100); do (echo > /dev/tcp/127.0.0.1/2222) 2>/dev/null && break; sleep 0.2; done
           "$openssh/ssh" -F /dev/null -i "$RUNNER_TEMP/client" -p 2222 -o BatchMode=yes \
@@ -129,4 +130,6 @@ jobs:
 
       - name: Service log
         if: always()
-        run: cat "$(brew --prefix)/var/log/quantumssh.log" 2>/dev/null || echo "no service log"
+        run: |
+          ls -la "$(brew --prefix)/etc/quantumssh" || true
+          cat "$(brew --prefix)/var/log/quantumssh.log" 2>/dev/null || echo "no service log"
