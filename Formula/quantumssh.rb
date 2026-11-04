@@ -62,9 +62,10 @@ class Quantumssh < Formula
   end
 
   # The configuration is written once: an upgrade keeps the operator's
-  # edits (overwrite: false). write_file creates it under the umask, and a
-  # umask of 002 leaves it group-writable, which the server refuses
-  # (ADR-0029): hence its mode.
+  # edits (overwrite: false). write_file gives a new file the mode of the
+  # directory's defaults: a umask of 002, or a default ACL such as the
+  # ubuntu-24.04 runner's, leaves it group-writable, and the server refuses
+  # that (ADR-0029). Hence its mode.
   post_install_steps do
     mkdir_p "quantumssh", base: :etc
     set_permissions "quantumssh", "0700", base: :etc, recursive: false

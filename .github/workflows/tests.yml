@@ -109,19 +109,21 @@ jobs:
           echo "XDG_RUNTIME_DIR=$runtime" >> "$GITHUB_ENV"
           echo "DBUS_SESSION_BUS_ADDRESS=unix:path=$runtime/bus" >> "$GITHUB_ENV"
 
-      # Step 4: the service end to end, with the caveats' chmod first.
+      # Step 4: the service end to end, with the caveats' steps. The host
+      # key comes from quantumssh keygen, which creates it at 0600. On
+      # ubuntu-24.04 Homebrew's etc carries a default ACL, under which
+      # ssh-keygen leaves a private key at 0644 and the server refuses it.
       - name: Run the service end to end
         run: |
           set -euo pipefail
           etc="$(brew --prefix)/etc"
           chmod g-w "$etc"
-          # Neither runner's own OpenSSH can create or use the composite key.
+          quantumssh keygen "$etc/quantumssh/ssh_host_mldsa44_ed25519_key"
+          # The client: neither runner's own OpenSSH can use the composite key.
           brew install openssh
           openssh="$(brew --prefix openssh)/bin"
-          "$openssh/ssh-keygen" -q -t mldsa44-ed25519 -N '' -f "$etc/quantumssh/ssh_host_mldsa44_ed25519_key"
           "$openssh/ssh-keygen" -q -t ed25519 -N '' -f "$RUNNER_TEMP/client"
           install -m 0644 "$RUNNER_TEMP/client.pub" "$etc/quantumssh/authorized_keys"
-          echo "umask $(umask)"; ls -la "$etc/quantumssh"
           brew services start quantumssh
           for _ in $(seq 1 100); do (echo > /dev/tcp/127.0.0.1/2222) 2>/dev/null && break; sleep 0.2; done
           "$openssh/ssh" -F /dev/null -i "$RUNNER_TEMP/client" -p 2222 -o BatchMode=yes \
