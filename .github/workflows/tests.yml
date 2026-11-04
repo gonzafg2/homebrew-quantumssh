@@ -1,0 +1,137 @@
+name: tests
+
+# ADR-0056 §4 (gonzafg2/quantumssh): on every pull request, on macOS arm64
+# and on ubuntu-24.04, check the formula's checksums against the release's
+# PGP-verified SHA256SUMS before installing anything, then install, test
+# and run the service end to end.
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # The project's current release key (keys/release-keys.txt, ADR-0057).
+  # A rotation or a compromise updates this pin by a reviewed pull request.
+  PINNED_CURRENT: 66DB5100B0700E4AE051971F9A8DFF06AFD25B24
+  HOMEBREW_NO_AUTO_UPDATE: 1
+  HOMEBREW_NO_INSTALL_CLEANUP: 1
+  HOMEBREW_NO_ENV_HINTS: 1
+
+jobs:
+  formula:
+    name: formula (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-26, ubuntu-24.04]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Step 1: the whole pin-set bundle and the check script, from the
+      # project's main, never from this repository.
+      - name: Fetch the pin set and verify-download.sh from quantumssh main
+        run: |
+          set -euo pipefail
+          git clone --quiet --depth 1 --filter=blob:none --sparse \
+            https://github.com/gonzafg2/quantumssh.git "$RUNNER_TEMP/quantumssh"
+          git -C "$RUNNER_TEMP/quantumssh" sparse-checkout set keys scripts
+          current="$(awk '!/^#/ && $2 == "current" { print $1 }' "$RUNNER_TEMP/quantumssh/keys/release-keys.txt")"
+          [ "$current" = "$PINNED_CURRENT" ] \
+            || { echo "::error::the pin set's current key is $current, not the pinned $PINNED_CURRENT"; exit 1; }
+
+      # Step 2: the signature on SHA256SUMS (ADR-0054 §7, retired keys
+      # included), then every formula sha256 against its verified line.
+      - name: Check the formula's checksums against the signed SHA256SUMS
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          formula=Formula/quantumssh.rb
+          tags="$(grep -Eo 'releases/download/v[0-9]+\.[0-9]+\.[0-9]+/' "$formula" | sort -u | cut -d/ -f3)"
+          [ "$(wc -l <<<"$tags")" -eq 1 ] || { echo "::error::the formula names more than one release: $tags"; exit 1; }
+          dl="$RUNNER_TEMP/release"
+          mkdir -p "$dl"
+          for f in SHA256SUMS SHA256SUMS.asc; do
+            curl -fsSL -o "$dl/$f" "https://github.com/gonzafg2/quantumssh/releases/download/$tags/$f"
+          done
+          bash "$RUNNER_TEMP/quantumssh/scripts/verify-download.sh" "$tags" "$dl"
+          # One "<sha256>  <file>" pair per url/sha256 stanza.
+          awk '/^ *url "/ { n = split($2, p, "/"); file = p[n]; gsub(/"/, "", file) }
+               /^ *sha256 "/ { gsub(/"/, "", $2); print $2 "  " file }' "$formula" | sort -u > "$RUNNER_TEMP/formula-sums"
+          cat "$RUNNER_TEMP/formula-sums"
+          grep -Fvxf "$dl/SHA256SUMS" "$RUNNER_TEMP/formula-sums" > "$RUNNER_TEMP/unmatched" || true
+          [ ! -s "$RUNNER_TEMP/unmatched" ] \
+            || { echo "::error::formula checksums not in the signed SHA256SUMS:"; cat "$RUNNER_TEMP/unmatched"; exit 1; }
+          # Every tarball the release signed has its stanza.
+          grep '\.tar\.gz$' "$dl/SHA256SUMS" | grep -Fvxf "$RUNNER_TEMP/formula-sums" > "$RUNNER_TEMP/missing" || true
+          [ ! -s "$RUNNER_TEMP/missing" ] \
+            || { echo "::error::signed tarballs with no formula stanza:"; cat "$RUNNER_TEMP/missing"; exit 1; }
+
+      # The ubuntu-24.04 image installs Homebrew but leaves it off PATH
+      # (actions/runner-images, Ubuntu2404-Readme.md, "Homebrew note").
+      - name: Put the runner's Homebrew on PATH
+        if: runner.os == 'Linux'
+        run: echo "/home/linuxbrew/.linuxbrew/bin" >> "$GITHUB_PATH"
+
+      # Step 3. post_install_steps needs a current Homebrew, and a tapped,
+      # trusted formula (Homebrew refuses a bare file path).
+      - name: Tap, lint, install and test
+        run: |
+          set -euo pipefail
+          brew update --quiet
+          brew --version
+          brew tap gonzafg2/quantumssh "$GITHUB_WORKSPACE"
+          brew trust gonzafg2/quantumssh
+          brew style gonzafg2/quantumssh/quantumssh
+          brew readall --os=all --arch=all gonzafg2/quantumssh
+          brew audit --strict gonzafg2/quantumssh/quantumssh
+          brew install gonzafg2/quantumssh/quantumssh
+          brew test gonzafg2/quantumssh/quantumssh
+
+      # brew services on Linux needs a systemd user manager.
+      - name: Start the runner's systemd user manager
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo loginctl enable-linger "$USER"
+          runtime="/run/user/$(id -u)"
+          for _ in $(seq 1 50); do [ -S "$runtime/bus" ] && break; sleep 0.2; done
+          echo "XDG_RUNTIME_DIR=$runtime" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=$runtime/bus" >> "$GITHUB_ENV"
+
+      # Step 4: the service end to end, with the caveats' steps. The host
+      # key comes from quantumssh keygen, which creates it at 0600. On
+      # ubuntu-24.04 Homebrew's etc carries a default ACL, under which
+      # ssh-keygen leaves a private key at 0644 and the server refuses it.
+      - name: Run the service end to end
+        run: |
+          set -euo pipefail
+          etc="$(brew --prefix)/etc"
+          chmod g-w "$etc"
+          quantumssh keygen "$etc/quantumssh/ssh_host_mldsa44_ed25519_key"
+          # The client: neither runner's own OpenSSH can use the composite key.
+          brew install openssh
+          openssh="$(brew --prefix openssh)/bin"
+          "$openssh/ssh-keygen" -q -t ed25519 -N '' -f "$RUNNER_TEMP/client"
+          install -m 0644 "$RUNNER_TEMP/client.pub" "$etc/quantumssh/authorized_keys"
+          brew services start quantumssh
+          for _ in $(seq 1 100); do (echo > /dev/tcp/127.0.0.1/2222) 2>/dev/null && break; sleep 0.2; done
+          "$openssh/ssh" -F /dev/null -i "$RUNNER_TEMP/client" -p 2222 -o BatchMode=yes \
+            -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$RUNNER_TEMP/known_hosts" \
+            "$(id -un)@127.0.0.1" true
+
+      - name: Service log
+        if: always()
+        run: |
+          ls -la "$(brew --prefix)/etc/quantumssh" || true
+          cat "$(brew --prefix)/var/log/quantumssh.log" 2>/dev/null || echo "no service log"
